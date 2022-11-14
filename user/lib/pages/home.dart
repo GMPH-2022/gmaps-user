@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/services.dart';
+import 'package:user/locationServices.dart';
 import 'dart:ui' as ui;
 import 'package:user/pages/place_service.dart';
 import 'package:flutter/foundation.dart';
@@ -15,7 +17,6 @@ import 'package:http/http.dart';
 import 'package:uuid/uuid.dart';
 import 'addressSearch.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-
 
 class Home extends StatefulWidget {
   const Home({Key? key}) : super(key: key);
@@ -41,8 +42,6 @@ class _HomeMapState extends State<Home> {
   String? destinationId;
   Position? currentPosition;
   Position? destinationPosition;
-  
-
 
   String timeLeft = '';
   String distanceLeft = '';
@@ -57,6 +56,7 @@ class _HomeMapState extends State<Home> {
   //when List is zero, it wont render the Listview.builder
   List<String> results = [];
   List<String> resultsPlaceId = [];
+  List<int> ij = [0, 0];
 
   String? _currentAddress;
   Position? _currentPosition = Position(
@@ -79,12 +79,14 @@ class _HomeMapState extends State<Home> {
   }
 
   Future<Uint8List> getBytesFromAsset(String path, int width) async {
-  ByteData data = await rootBundle.load(path);
-  ui.Codec codec = await ui.instantiateImageCodec(data.buffer.asUint8List(), targetWidth: width);
-  ui.FrameInfo fi = await codec.getNextFrame();
-  return (await fi.image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
-}
-
+    ByteData data = await rootBundle.load(path);
+    ui.Codec codec = await ui.instantiateImageCodec(data.buffer.asUint8List(),
+        targetWidth: width);
+    ui.FrameInfo fi = await codec.getNextFrame();
+    return (await fi.image.toByteData(format: ui.ImageByteFormat.png))!
+        .buffer
+        .asUint8List();
+  }
 
   List _decodePoly(String poly) {
     var list = poly.codeUnits;
@@ -108,7 +110,6 @@ class _HomeMapState extends State<Home> {
       lList.add(result1);
     } while (index < len);
     for (var i = 2; i < lList.length; i++) lList[i] += lList[i - 2];
-    // print(lList.toString());
     return lList;
   }
 
@@ -122,33 +123,70 @@ class _HomeMapState extends State<Home> {
     return result;
   }
 
+  late StreamSubscription<dynamic> streamSubscription;
+  late StreamSubscription<Position> positionStream;
+
   @override
   void dispose() {
+    streamSubscription.cancel();
     mapController.dispose();
+    positionStream.cancel();
   }
 
-  @override
-  void initState() {
-    FirebaseFirestore firestore = FirebaseFirestore.instance;
-    CollectionReference driver = firestore.collection('driver');
+  late final Uint8List markerIcon;
 
-    Geolocator.getPositionStream().listen((position) async {
+  @override
+  void initState() async {
+    markerIcon = await getBytesFromAsset('assets/images/ambulanceimg.png', 120);
+    FirebaseFirestore firestore = FirebaseFirestore.instance;
+    CollectionReference driver = firestore.collection('grid');
+
+    positionStream = Geolocator.getPositionStream().listen((position) async {
+      var res =
+          LocationServices().gridIndex(position.latitude, position.longitude);
+      if (res[0] != ij[0] || res[1] != ij[1]) {
+        setState(() {
+          ij = res;
+        });
+        // if(streamSubscription != null) {
+        //   streamSubscription.cancel();
+        // }
+        
+        var ijRef = driver.doc(ij[0].toString()).collection(ij[1].toString());
+        streamSubscription = ijRef.snapshots().listen((event) {
+          event.docChanges.forEach((element) async {
+            var ambLat = (element.doc['live']['latitude']);
+            var ambLng = (element.doc['live']['longitude']);
+
+            Fluttertoast.showToast(msg: 'Ambulance: $ambLat, $ambLng');
+
+            markers.add(Marker(
+              markerId: MarkerId(element.doc.id),
+              icon: BitmapDescriptor.fromBytes(markerIcon),
+              position: LatLng(ambLat, ambLng),
+              infoWindow: const InfoWindow(
+                title: 'Ambulance',
+              ),
+            ));
+          });
+        });
+      }
+
       // 1. keep changing the current address until destination is searched
       // 2. keep changing distanceLeft and timeLeft once destination is searched, take currentPosition into account
 
       currentPosition = position;
       speed = ((position.speed * 18) / 5).toStringAsFixed(2);
 
-      List<Placemark> placemarks =
-          await placemarkFromCoordinates(position.latitude, position.longitude);
-      Placemark place = placemarks[0];
-
-      currentAddress = "${place.name}, ${place.locality}";
-
       if (destinationSet == false) {
         mapController.animateCamera(CameraUpdate.newLatLngZoom(
-            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-            15.5));
+            LatLng(position.latitude, position.longitude), 15.5));
+
+        List<Placemark> placemarks = await placemarkFromCoordinates(
+            position.latitude, position.longitude);
+        Placemark place = placemarks[0];
+
+        currentAddress = "${place.name}, ${place.locality}";
 
         sourceAddress = currentAddress;
 
@@ -165,6 +203,12 @@ class _HomeMapState extends State<Home> {
         mapController
             .animateCamera(CameraUpdate.newCameraPosition(cameraPosition));
 
+        List<Placemark> placemarks = await placemarkFromCoordinates(
+            position.latitude, position.longitude);
+        Placemark place = placemarks[0];
+
+        currentAddress = "${place.name}, ${place.locality}";
+
         String query =
             'https://maps.googleapis.com/maps/api/distancematrix/json?origins=$currentAddress&destinations=${destinationAddress}&units=metric&key=$apiKey';
         Response response = await client.get(Uri.parse(query));
@@ -174,27 +218,6 @@ class _HomeMapState extends State<Home> {
           distanceLeft = data['rows'][0]['elements'][0]['distance']['text'];
         });
       }
-    });
-
-    Geolocator.getPositionStream().listen((position) async {
-      var data = {
-        'live': {
-          'latitude': position.latitude,
-          'longitude': position.longitude,
-          'speed': position.speed,
-          'timestamp': position.timestamp,
-        }
-      };
-
-      // ignore: todo
-      //TODO: Uncomment this
-      // driver
-      //     .doc('ZEgtVLroHxrTHGLcNnud')
-      //     .update(data)
-      //     .then((value) => Fluttertoast.showToast(msg: 'updated'));
-
-      _currentPosition = position;
-      speed = ((position.speed * 18) / 5).toStringAsFixed(2);
     });
   }
 
@@ -208,7 +231,6 @@ class _HomeMapState extends State<Home> {
     Placemark place = placemarks[0];
     return place.name!;
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -225,22 +247,15 @@ class _HomeMapState extends State<Home> {
             child: Column(
               children: [
                 Expanded(
-                  child: GestureDetector(
-                    onTap: () {
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      results.clear();
-                      setState(() {});
-                    },
-                    child: GoogleMap(
-                      polylines: Set<Polyline>.of(polylines),
-                      markers: Set<Marker>.of(markers),
-                      myLocationEnabled: true,
-                      onMapCreated: _onMapCreated,
-                      initialCameraPosition: CameraPosition(
-                        target: _center,
-                        zoom: 16.0,
-                        // tilt: 3
-                      ),
+                  child: GoogleMap(
+                    polylines: Set<Polyline>.of(polylines),
+                    markers: Set<Marker>.of(markers),
+                    myLocationEnabled: true,
+                    onMapCreated: _onMapCreated,
+                    initialCameraPosition: CameraPosition(
+                      target: _center,
+                      zoom: 16.0,
+                      // tilt: 3
                     ),
                   ),
                 ),
@@ -249,6 +264,7 @@ class _HomeMapState extends State<Home> {
                   child: Column(
                     children: [
                       Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Expanded(
                             child: Padding(
@@ -264,19 +280,20 @@ class _HomeMapState extends State<Home> {
                           ),
                         ],
                       ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: navigationStarted
-                                ? Center(
-                                    child: Padding(
+                      Center(
+                        child: Row(
+                          children: [
+                            Expanded(child: Text('ij is $ij')),
+                            Expanded(
+                              child: navigationStarted
+                                  ? Padding(
                                       padding: EdgeInsets.all(8.0),
                                       child: Text('Speed is $speed'),
-                                    ),
-                                  )
-                                : Center(),
-                          )
-                        ],
+                                    )
+                                  : Center(),
+                            )
+                          ],
+                        ),
                       ),
                       navigationStarted
                           ? TextButton(
@@ -291,7 +308,7 @@ class _HomeMapState extends State<Home> {
                             )
                           : TextButton(
                               onPressed: () {
-                                if (!navigationStarted &&  destinationSet) {
+                                if (!navigationStarted && destinationSet) {
                                   navigationStarted = true;
                                   setState(() {});
                                 }
@@ -349,29 +366,21 @@ class _HomeMapState extends State<Home> {
                             decoration: const InputDecoration(
                               hintText: "Enter Location",
                             ),
-                            onTap: () async {
-                              var res = await placeApiProvider.fetchSuggestions(
-                                  _destinationController.text);
-                              results = res.map((e) => e.description).toList();
-                            },
                           ),
                         ),
                         IconButton(
                           onPressed: () {
                             _destinationController.clear();
+                            destinationSet = false;
+                            polylines.clear();
                             FocusManager.instance.primaryFocus?.unfocus();
-                            // setState(() {
                             results.clear();
-                            // });
                           },
                           icon: const Icon(Icons.clear),
                         ),
                       ],
                     ),
                   ),
-                  // const SizedBox(
-                  //   height: 10,
-                  // ),
                   results.length != 0
                       ? Container(
                           color: Colors.white,
@@ -398,9 +407,7 @@ class _HomeMapState extends State<Home> {
                                 _destinationController.text =
                                     destinationAddress!;
 
-                                    
-
-                                markers.clear();
+                                markers.remove('destination');
                                 destinationId = resultsPlaceId[index];
                                 String query =
                                     'https://maps.googleapis.com/maps/api/place/details/json?placeid=$destinationId&key=$apiKey&sessiontoken=$sessionToken';
@@ -414,15 +421,21 @@ class _HomeMapState extends State<Home> {
                                     data['result']['geometry']['location']
                                         ['lng']);
 
-                                final Uint8List markerIcon = await getBytesFromAsset('assets/images/ambulanceimg.png', 150);        
                                 markers.add(Marker(
-                                  markerId: MarkerId(destinationId!),
-                                  icon: BitmapDescriptor.fromBytes(markerIcon),
+                                  markerId: const MarkerId('destination'),
                                   position: destinationLatLng,
                                   infoWindow: InfoWindow(
                                     title: results[index].toString(),
                                   ),
                                 ));
+
+                                // markers.add(Marker(
+                                //   markerId: MarkerId(destinationId!),
+                                //   position: destinationLatLng,
+                                //   infoWindow: InfoWindow(
+                                //     title: results[index].toString(),
+                                //   ),
+                                // ));
 
                                 query =
                                     "https://maps.googleapis.com/maps/api/directions/json?origin=${currentPosition!.latitude},${currentPosition!.longitude}&destination=${destinationLatLng.latitude},${destinationLatLng.longitude}&key=$apiKey";
@@ -460,7 +473,6 @@ class _HomeMapState extends State<Home> {
                                 });
 
                                 results.clear();
-                                
 
                                 setState(() {});
                               },
